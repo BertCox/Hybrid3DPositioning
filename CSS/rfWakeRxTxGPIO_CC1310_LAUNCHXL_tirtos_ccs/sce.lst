@@ -1,0 +1,901 @@
+               .deffile adi_defs__0.asm
+               .deffile ddi_defs__0.asm
+               .deffile reg_defs__0.asm
+               .deffile sce_defs__0.asm
+
+               ; Number of supported tasks
+               .define TASK_COUNT      1
+
+               ; Resource-specified definitions, if any
+               ; (None)
+
+
+               .segment begin "Framework"
+
+
+               VectorTable:
+0000 ---- 1408                         jsr         PowerUp
+0001 ---- 040c                         jmp         TaskCtrlReqVector
+0002 ---- 1408                         jsr         PowerUp
+0003 ---- 042c                         jmp         AonRtcCh2Vector
+0004 ---- 1408                         jsr         PowerUp
+0005 ---- 0447                         jmp         Event0Vector
+0006 ---- 1408                         jsr         PowerUp
+0007 ---- 044d                         jmp         TaskAlertAckVector
+
+
+
+
+               PowerUp:
+                                       ; Deassert the power-down request
+0008 ---- 4436                         iobclr      #0, [#IOP_WUC_PWRDWNREQ]
+
+                                       ; Wait for it to take effect
+0009 ---- 2437 /waitForPdAck:          iobtst      #0, [#IOP_WUC_PWRDWNACK]
+000a ---- aefe                         biob1       /waitForPdAck
+
+               FwEmptyFunc:            ; Done
+000b ---- adb7                         rts
+
+
+
+
+               TaskCtrlReqVector:
+                                       ; Clear the vector flag
+000c ---- 6442                         iobset      #0, [#IOP_EVCTL_VECFLAGSCLR]
+
+                                       ; For each task ...
+000d ---- 7000                         ld          R7, #0
+               /loop:
+                                           ; Save the task ID
+000e ---- 7c6b                             st          R7, [#fwCtrlInt/taskId]
+
+                                           ; Handle initialize request, if any
+000f ---- 6872                             ld          R6, [#fwCtrlExt/bvTaskInitializeReq]
+0010 ---- 0068                             ld          R0, #pFwTaskInitializeFuncTable
+0011 ---- 1425                             jsr         /handleReq
+
+                                           ; Handle execute request, if any
+0012 ---- 6873                             ld          R6, [#fwCtrlExt/bvTaskExecuteReq]
+0013 ---- 0069                             ld          R0, #pFwTaskExecuteFuncTable
+0014 ---- 1425                             jsr         /handleReq
+
+                                           ; Handle terminate request, if any
+0015 ---- 6874                             ld          R6, [#fwCtrlExt/bvTaskTerminateReq]
+0016 ---- 006a                             ld          R0, #pFwTaskTerminateFuncTable
+0017 ---- 1425                             jsr         /handleReq
+
+                                           ; Move on to the next task
+0018 ---- 786b                             ld          R7, [#fwCtrlInt/taskId]
+0019 ---- f801                             add         R7, #1
+
+001a ---- fa01                         cmp         R7, #TASK_COUNT
+001b ---- bef2                         bneq        /loop
+
+                                       ; Update which tasks are ...
+001c ---- 7870                         ld          R7, [#fwCtrlExt/bvActiveTasks]
+                                       ; ... currently active ...
+001d ---- 6872                         ld          R6, [#fwCtrlExt/bvTaskInitializeReq]
+001e ---- fd0e                         or          R7, R6
+                                       ; ... and inactive ...
+001f ---- 6874                         ld          R6, [#fwCtrlExt/bvTaskTerminateReq]
+0020 ---- ed92                         inv         R6
+0021 ---- fd06                         and         R7, R6
+0022 ---- 7c70                         st          R7, [#fwCtrlExt/bvActiveTasks]
+
+                                       ; We're READY for another request
+0023 ---- 642d                         iobset      #IOB_EVCTL_SWEV_READY, [#IOP_EVCTL_SWEVSET]
+
+                                       ; Generate an ALERT interrupt if needed before powering back down
+0024 ---- 0450                         jmp         GenAlertInterrupt;
+
+               /handleReq:
+                                       ; Restore the task ID, and load the function pointer (here to avoid pipeline hazard)
+0025 ---- 786b                         ld          R7, [#fwCtrlInt/taskId]
+0026 ---- 8f1f                         ld          R0, [R7+R0]
+
+                                       ; Skip this request?
+0027 ---- ed8f                         lsr         R6, R7
+0028 ---- ec01                         tst         R6, #0x0001
+0029 ---- be01                         bnz         /noSkip
+002a ---- adb7                             rts
+               /noSkip:
+                                       ; Make the call by jump, with return (rts) in the "called" function
+002b ---- 8db7                         jmp         R0
+
+
+
+
+               AonRtcCh2Vector:
+                                       ; Start clearing the RTC event
+002c ---- 6630                         iobset      #IOB_WUC_WUEV_RTC, [#IOP_WUC_WUEVCLR]
+
+                                       ; Clear the vector flag
+002d ---- 6542                         iobset      #1, [#IOP_EVCTL_VECFLAGSCLR]
+
+                                       ; For each task (R0 is the current task ID) ...
+002e ---- 0000                         ld          R0, #0
+               /loop:
+                                           ; ... that is active ...
+002f ---- 1870                             ld          R1, [#fwCtrlExt/bvActiveTasks]
+0030 ---- 9d88                             lsr         R1, R0
+0031 ---- 9c01                             tst         R1, #0x0001
+0032 ---- b60d                             bz          /skip
+
+                                               ; Fetch number of RTC intervals until next execution
+0033 ---- 1067                                 ld          R1, #pFwTaskExecuteScheduleTable
+0034 ---- af19                                 ld          R2, [R1+R0]
+
+                                               ; If not already 0, decrement and store. If then 0 ...
+0035 ---- aa00                                 cmp         R2, #0
+0036 ---- b609                                 beq         /skip
+0037 ---- a8ff                                 add         R2, #-1
+0038 ---- af39                                 st          R2, [R1+R0]
+0039 ---- be06                                 bnz         /skip
+
+                                                   ; ... execute the task
+003a ---- 0c6b                                     st          R0, [#fwCtrlInt/taskId]
+003b ---- 8869                                     add         R0, #pFwTaskExecuteFuncTable
+003c ---- 8f08                                     ld          R0, [R0]
+                                                   ; Insert NOP to avoid pipeline hazard
+003d ---- fd47                                     nop
+003e ---- 9db7                                     jsr         R0
+003f ---- 086b                                     ld          R0, [#fwCtrlInt/taskId]
+               /skip:
+                                           ; Move on to the next task
+0040 ---- 8801                             add         R0, #1
+
+0041 ---- 8a01                         cmp         R0, #TASK_COUNT
+0042 ---- beec                         bneq        /loop
+
+                                       ; Wait for the ACK event to be cleared
+0043 ---- 262f /waitOnRtcClearing:     iobtst      #IOB_WUC_WUEV_RTC, [#IOP_WUC_WUEVFLAGS]
+0044 ---- aefe                         biob1       /waitOnRtcClearing
+0045 ---- 4630                         iobclr      #IOB_WUC_WUEV_RTC, [#IOP_WUC_WUEVCLR]
+
+                                       ; Generate an ALERT interrupt if needed
+0046 ---- 0450                         jmp         GenAlertInterrupt;
+
+
+
+
+               Event0Vector:
+                                       ; Disable and clear the vector flag
+0047 ---- 5527                         iobclr      #IOB_EVCTL_VECCFG1_VEC2_EN, [#IOP_EVCTL_VECCFG1]
+0048 ---- 6642                         iobset      #2, [#IOP_EVCTL_VECFLAGSCLR]
+
+                                       ; Set the task ID
+0049 ---- 0000                         ld          R0, #0
+004a ---- 0c6b                         st          R0, [#fwCtrlInt/taskId]
+
+                                       ; Jump to the event task code
+004b ---- 149a                         jsr         binarySampling/event0
+
+                                       ; Generate an ALERT interrupt if needed
+004c ---- 0450                         jmp         GenAlertInterrupt;
+
+
+
+
+               TaskAlertAckVector:
+                                       ; Clear the vector flag
+004d ---- 6742                         iobset      #3, [#IOP_EVCTL_VECFLAGSCLR]
+
+                                       ; Re-enable generation of ALERT interrupts
+004e ---- 03ff                         ld          R0, #-1
+004f ---- 0c6d                         st          R0, [#fwCtrlInt/alertGenMask]
+
+                                       ; Fall through to GenAlertInterrupt to generate another ALERT interrupt if needed
+
+
+
+
+               GenAlertInterrupt:
+                                       ; Do we have any ALERT-generating flags pending?
+0050 ---- 786c                         ld          R7, [#fwCtrlInt/bvTaskIoAlert]
+
+                                       ; Skip if the last I/O ALERT interrupt has not been acknowledged
+0051 ---- 686d                         ld          R6, [#fwCtrlInt/alertGenMask]
+0052 ---- ed37                         tst         R6, R7
+0053 ---- b605                         bz          /skipAlertGen
+
+                                           ; Transfer I/O flags from internal to external
+0054 ---- 0000                             ld          R0, #0
+0055 ---- 0c6c                             st          R0, [#fwCtrlInt/bvTaskIoAlert]
+0056 ---- 7c71                             st          R7, [#fwCtrlExt/bvTaskIoAlert]
+
+                                           ; Generate the ALERT interrupt, and clear the generation mask
+0057 ---- 652d                             iobset      #IOB_EVCTL_SWEV_ALERT, [#IOP_EVCTL_SWEVSET]
+0058 ---- 0c6d                             st          R0, [#fwCtrlInt/alertGenMask]
+               /skipAlertGen:
+                                       ; Fall through to PowerDown ...
+
+
+
+
+               PowerDown:
+                                       ; If there are no unacknowledged ALERTs and no vectors pending ...
+0059 ---- 786d                         ld          R7, [#fwCtrlInt/alertGenMask]
+005a ---- 686e                         ld          R6, [#fwCtrlInt/alertCanPdAuxMask]
+005b ---- fd0e                         or          R7, R6
+005c ---- f801                         add         R7, #1 ; 0xFFFF -> 0x0000
+005d ---- e92b                         in          R6, [#IOP_EVCTL_VECFLAGS]
+005e ---- fd0e                         or          R7, R6
+005f ---- be01                         bnz         /noPowerDown
+
+                                           ; Assert the power-down request. We'll make sure that it has taken effect
+                                           ; or been completely ignored when waking up again
+0060 ---- 6436                             iobset      #0, [#IOP_WUC_PWRDWNREQ]
+               /noPowerDown:
+                                       ; Sleep until the next event
+0061 ---- bdb7 sleepInstr:             sleep
+
+
+
+
+0062 ---- 241a AdiDdiAcquire:          iobtst      #0, [#IOP_SMPH_SMPH0]
+0063 ---- a6fe                         biob0       AdiDdiAcquire
+0064 ---- adb7                         rts
+
+0065 ---- 641a AdiDdiRelease:          iobset      #0, [#IOP_SMPH_SMPH0]
+0066 ---- adb7                         rts
+
+
+
+
+               ; RTC ticks until next execution, one word for each task
+               pFwTaskExecuteScheduleTable:
+0067 ---- 0000                         dw          #0
+
+               ; Task code function pointers for each task code block, one word for each task
+               pFwTaskInitializeFuncTable:
+0068 ---- 0095                         dw          #binarySampling/initialize
+               pFwTaskExecuteFuncTable:
+0069 ---- 0099                         dw          #binarySampling/execute
+               pFwTaskTerminateFuncTable:
+006a ---- 01ac                         dw          #binarySampling/terminate
+
+               ; Run-time logging log requests and masks, one bit for each struct, one word for each task
+               pRtlTaskLogReqTable:
+               ; (Run-time logging is not used in this project)
+               pRtlTaskLogMaskTable:
+               ; (Run-time logging is not used in this project)
+
+
+               ; Internal control data
+               fwCtrlInt:
+006b ---- 0000 /taskId:                dw          #0      ; ID of the currently running task
+006c ---- 0000 /bvTaskIoAlert:         dw          #0x0000 ; LSB = Normal data exchange, MSB = Overflow or underflow
+006d ---- ffff /alertGenMask:          dw          #0xFFFF ; Can generate an ALERT interrupt now? (0xFFFF = yes, 0x0000 = no)
+006e ---- 0000 /alertCanPdAuxMask:     dw          #0x0000 ; Can power down AUX domain after ALERT interrupt generation? (0xFFFF = yes, 0x0000 = no)
+006f ---- 0000 /rtlStructLockReq:      dw          #0x0000 ; Run-time logging struct lock request (0=idle -> 1=requested -> 2=ready -> access -> 0=idle)
+
+               ; External control data, shared with the driver
+               fwCtrlExt:
+0070 ---- 0000 /bvActiveTasks:         dw          #0x0000 ; Indicates which tasks are currently active
+0071 ---- 0000 /bvTaskIoAlert:         dw          #0x0000 ; LSB = Normal data exchange, MSB = Overflow or underflow
+0072 ---- 0000 /bvTaskInitializeReq:   dw          #0x0000 ; Requests tasks to start
+0073 ---- 0000 /bvTaskExecuteReq:      dw          #0x0000 ; Requests tasks to execute once immediately
+0074 ---- 0000 /bvTaskTerminateReq:    dw          #0x0000 ; Requests tasks to stop
+
+
+               .segment end "Framework"
+
+
+               fwTaskDataStructures:
+               .segment begin "Task: binarySampling"
+               binarySampling/cfg:
+               binarySampling/input:
+               binarySampling/output:
+               binarySampling/output/outputArray:
+0075 ---- 0000                         dw          #0
+0076 ---- 0000                         dw          #0
+0077 ---- 0000                         dw          #0
+0078 ---- 0000                         dw          #0
+0079 ---- 0000                         dw          #0
+007a ---- 0000                         dw          #0
+007b ---- 0000                         dw          #0
+007c ---- 0000                         dw          #0
+007d ---- 0000                         dw          #0
+007e ---- 0000                         dw          #0
+007f ---- 0000                         dw          #0
+0080 ---- 0000                         dw          #0
+0081 ---- 0000                         dw          #0
+0082 ---- 0000                         dw          #0
+0083 ---- 0000                         dw          #0
+0084 ---- 0000                         dw          #0
+0085 ---- 0000                         dw          #0
+0086 ---- 0000                         dw          #0
+0087 ---- 0000                         dw          #0
+0088 ---- 0000                         dw          #0
+0089 ---- 0000                         dw          #0
+008a ---- 0000                         dw          #0
+008b ---- 0000                         dw          #0
+008c ---- 0000                         dw          #0
+008d ---- 0000                         dw          #0
+008e ---- 0000                         dw          #0
+008f ---- 0000                         dw          #0
+0090 ---- 0000                         dw          #0
+0091 ---- 0000                         dw          #0
+0092 ---- 0000                         dw          #0
+0093 ---- 0000                         dw          #0
+0094 ---- 0000                         dw          #0
+               binarySampling/state:
+               .segment end "Task: binarySampling"
+
+
+               .segment begin "Task: binarySampling"
+               binarySampling/initialize:
+               ;? evhSetupGpioTrigger(0, AUXIO_I_INPUT_TRIGGER, 1, EVH_GPIO_TRIG_ON_EDGE);
+0095 ---- 703b                         ld          R7, #((BV_EVCTL_VECCFG1_VEC2_EN | ((EVCTL_VECEVSEL_AUXIO0 + 14) << IOB_EVCTL_VECCFG1_VEC2_EV)) | ((1 == 0) << IOB_EVCTL_VECCFG1_VEC2_POL))
+0096 ---- 15ad                         jsr         EvhSetupTrigger
+0097 ---- 6642                         iobset      #2, [#IOP_EVCTL_VECFLAGSCLR]
+               binarySampling/initializeDone:
+0098 ---- adb7                         rts
+
+
+
+
+               binarySampling/execute:
+               ;?
+               binarySampling/executeDone:
+0099 ---- adb7                         rts
+
+
+
+
+               binarySampling/event0:
+               ;? U16 signal;
+               ;?
+               ;?
+               ;? // Generate timer events at every 2 us
+               ;? timer0Start(TIMER0_MODE_PERIODICAL, 48, 0);
+009a ---- 0030                         ld          R0, #48
+009b ---- 8b0c                         out         R0, [#IOP_TIMER01_T0TARGET]
+009c ---- 0001                         ld          R0, #((0 << IOB_TIMER01_TXCFG_PRE) | (1 * BV_TIMER01_TXCFG_RELOAD))
+009d ---- 8b09                         out         R0, [#IOP_TIMER01_T0CFG]
+009e ---- 640b                         iobset      #0, [#IOP_TIMER01_T0CTL]
+               ;?
+               ;? // Generate one pulse right away
+               ;? //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;? //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;? // Generate 512 pulses: 32*16
+               ;? for (U16 n = 0; n < 32; n++) {
+009f ---- 0000                         ld          R0, #0
+               /id0263:
+               ;?
+               ;?     // PROBLEMS:    FOR-LOOP ONLY USES N AS INDEX
+               ;?     //              ARRAY ONLY USES N AS INDEX
+               ;?
+               ;?
+               ;?     //--------------------Iteration 1-------------------------
+               ;?     // Wait for timer event before generating each pulse
+               ;?     timer0Wait();
+00a0 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+00a1 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+00a2 ---- fdab                             lsr         R7, #(3)
+00a3 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+00a4 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+00a5 ---- 9f19                             ld          R1, [R1+R0]
+00a6 ---- 9da1                             lsl         R1, #1
+00a7 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+00a8 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+00a9 ---- fa01                             cmp         R7, #1
+00aa ---- be05                             bneq        /id0092
+               ;?         output.outputArray[n] += 1;
+00ab ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+00ac ---- 9f19                                 ld          R1, [R1+R0]
+00ad ---- 9801                                 add         R1, #1
+00ae ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+00af ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0092:
+               ;?
+               ;?     //--------------------Iteration 2-------------------------
+               ;?     timer0Wait();
+00b0 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+00b1 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+00b2 ---- fdab                             lsr         R7, #(3)
+00b3 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+00b4 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+00b5 ---- 9f19                             ld          R1, [R1+R0]
+00b6 ---- 9da1                             lsl         R1, #1
+00b7 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+00b8 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+00b9 ---- fa01                             cmp         R7, #1
+00ba ---- be05                             bneq        /id0103
+               ;?         output.outputArray[n] += 1;
+00bb ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+00bc ---- 9f19                                 ld          R1, [R1+R0]
+00bd ---- 9801                                 add         R1, #1
+00be ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+00bf ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0103:
+               ;?
+               ;?     //--------------------Iteration 3-------------------------
+               ;?     timer0Wait();
+00c0 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+00c1 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+00c2 ---- fdab                             lsr         R7, #(3)
+00c3 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+00c4 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+00c5 ---- 9f19                             ld          R1, [R1+R0]
+00c6 ---- 9da1                             lsl         R1, #1
+00c7 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+00c8 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+00c9 ---- fa01                             cmp         R7, #1
+00ca ---- be05                             bneq        /id0114
+               ;?         output.outputArray[n] += 1;
+00cb ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+00cc ---- 9f19                                 ld          R1, [R1+R0]
+00cd ---- 9801                                 add         R1, #1
+00ce ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+00cf ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0114:
+               ;?
+               ;?     //--------------------Iteration 4-------------------------
+               ;?     timer0Wait();
+00d0 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+00d1 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+00d2 ---- fdab                             lsr         R7, #(3)
+00d3 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+00d4 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+00d5 ---- 9f19                             ld          R1, [R1+R0]
+00d6 ---- 9da1                             lsl         R1, #1
+00d7 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+00d8 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+00d9 ---- fa01                             cmp         R7, #1
+00da ---- be05                             bneq        /id0125
+               ;?         output.outputArray[n] += 1;
+00db ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+00dc ---- 9f19                                 ld          R1, [R1+R0]
+00dd ---- 9801                                 add         R1, #1
+00de ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+00df ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0125:
+               ;?
+               ;?     //--------------------Iteration 5-------------------------
+               ;?     timer0Wait();
+00e0 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+00e1 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+00e2 ---- fdab                             lsr         R7, #(3)
+00e3 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+00e4 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+00e5 ---- 9f19                             ld          R1, [R1+R0]
+00e6 ---- 9da1                             lsl         R1, #1
+00e7 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+00e8 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+00e9 ---- fa01                             cmp         R7, #1
+00ea ---- be05                             bneq        /id0136
+               ;?         output.outputArray[n] += 1;
+00eb ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+00ec ---- 9f19                                 ld          R1, [R1+R0]
+00ed ---- 9801                                 add         R1, #1
+00ee ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+00ef ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0136:
+               ;?
+               ;?
+               ;?     //--------------------Iteration 6-------------------------
+               ;?     timer0Wait();
+00f0 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+00f1 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+00f2 ---- fdab                             lsr         R7, #(3)
+00f3 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+00f4 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+00f5 ---- 9f19                             ld          R1, [R1+R0]
+00f6 ---- 9da1                             lsl         R1, #1
+00f7 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+00f8 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+00f9 ---- fa01                             cmp         R7, #1
+00fa ---- be05                             bneq        /id0147
+               ;?         output.outputArray[n] += 1;
+00fb ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+00fc ---- 9f19                                 ld          R1, [R1+R0]
+00fd ---- 9801                                 add         R1, #1
+00fe ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+00ff ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0147:
+               ;?
+               ;?     //--------------------Iteration 7-------------------------
+               ;?     timer0Wait();
+0100 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+0101 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+0102 ---- fdab                             lsr         R7, #(3)
+0103 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+0104 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+0105 ---- 9f19                             ld          R1, [R1+R0]
+0106 ---- 9da1                             lsl         R1, #1
+0107 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+0108 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+0109 ---- fa01                             cmp         R7, #1
+010a ---- be05                             bneq        /id0158
+               ;?         output.outputArray[n] += 1;
+010b ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+010c ---- 9f19                                 ld          R1, [R1+R0]
+010d ---- 9801                                 add         R1, #1
+010e ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+010f ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0158:
+               ;?
+               ;?     //--------------------Iteration 8-------------------------
+               ;?     timer0Wait();
+0110 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+0111 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+0112 ---- fdab                             lsr         R7, #(3)
+0113 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+0114 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+0115 ---- 9f19                             ld          R1, [R1+R0]
+0116 ---- 9da1                             lsl         R1, #1
+0117 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+0118 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+0119 ---- fa01                             cmp         R7, #1
+011a ---- be05                             bneq        /id0169
+               ;?         output.outputArray[n] += 1;
+011b ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+011c ---- 9f19                                 ld          R1, [R1+R0]
+011d ---- 9801                                 add         R1, #1
+011e ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+011f ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0169:
+               ;?
+               ;?     //--------------------Iteration 9-------------------------
+               ;?     timer0Wait();
+0120 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+0121 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+0122 ---- fdab                             lsr         R7, #(3)
+0123 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+0124 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+0125 ---- 9f19                             ld          R1, [R1+R0]
+0126 ---- 9da1                             lsl         R1, #1
+0127 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+0128 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+0129 ---- fa01                             cmp         R7, #1
+012a ---- be05                             bneq        /id0180
+               ;?         output.outputArray[n] += 1;
+012b ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+012c ---- 9f19                                 ld          R1, [R1+R0]
+012d ---- 9801                                 add         R1, #1
+012e ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+012f ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0180:
+               ;?
+               ;?     //--------------------Iteration 10-------------------------
+               ;?     timer0Wait();
+0130 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+0131 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+0132 ---- fdab                             lsr         R7, #(3)
+0133 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+0134 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+0135 ---- 9f19                             ld          R1, [R1+R0]
+0136 ---- 9da1                             lsl         R1, #1
+0137 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+0138 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+0139 ---- fa01                             cmp         R7, #1
+013a ---- be05                             bneq        /id0191
+               ;?         output.outputArray[n] += 1;
+013b ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+013c ---- 9f19                                 ld          R1, [R1+R0]
+013d ---- 9801                                 add         R1, #1
+013e ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+013f ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0191:
+               ;?
+               ;?     //--------------------Iteration 11-------------------------
+               ;?     timer0Wait();
+0140 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+0141 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+0142 ---- fdab                             lsr         R7, #(3)
+0143 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+0144 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+0145 ---- 9f19                             ld          R1, [R1+R0]
+0146 ---- 9da1                             lsl         R1, #1
+0147 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+0148 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+0149 ---- fa01                             cmp         R7, #1
+014a ---- be05                             bneq        /id0202
+               ;?         output.outputArray[n] += 1;
+014b ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+014c ---- 9f19                                 ld          R1, [R1+R0]
+014d ---- 9801                                 add         R1, #1
+014e ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+014f ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0202:
+               ;?
+               ;?
+               ;?     //--------------------Iteration 12-------------------------
+               ;?     timer0Wait();
+0150 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+0151 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+0152 ---- fdab                             lsr         R7, #(3)
+0153 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+0154 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+0155 ---- 9f19                             ld          R1, [R1+R0]
+0156 ---- 9da1                             lsl         R1, #1
+0157 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+0158 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+0159 ---- fa01                             cmp         R7, #1
+015a ---- be05                             bneq        /id0213
+               ;?         output.outputArray[n] += 1;
+015b ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+015c ---- 9f19                                 ld          R1, [R1+R0]
+015d ---- 9801                                 add         R1, #1
+015e ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+015f ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0213:
+               ;?
+               ;?     //--------------------Iteration 13-------------------------
+               ;?     timer0Wait();
+0160 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+0161 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+0162 ---- fdab                             lsr         R7, #(3)
+0163 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+0164 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+0165 ---- 9f19                             ld          R1, [R1+R0]
+0166 ---- 9da1                             lsl         R1, #1
+0167 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+0168 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+0169 ---- fa01                             cmp         R7, #1
+016a ---- be05                             bneq        /id0224
+               ;?         output.outputArray[n] += 1;
+016b ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+016c ---- 9f19                                 ld          R1, [R1+R0]
+016d ---- 9801                                 add         R1, #1
+016e ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+016f ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0224:
+               ;?
+               ;?     //--------------------Iteration 14-------------------------
+               ;?     timer0Wait();
+0170 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+0171 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+0172 ---- fdab                             lsr         R7, #(3)
+0173 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+0174 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+0175 ---- 9f19                             ld          R1, [R1+R0]
+0176 ---- 9da1                             lsl         R1, #1
+0177 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+0178 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+0179 ---- fa01                             cmp         R7, #1
+017a ---- be05                             bneq        /id0235
+               ;?         output.outputArray[n] += 1;
+017b ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+017c ---- 9f19                                 ld          R1, [R1+R0]
+017d ---- 9801                                 add         R1, #1
+017e ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+017f ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0235:
+               ;?
+               ;?     //--------------------Iteration 15-------------------------
+               ;?     timer0Wait();
+0180 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+0181 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+0182 ---- fdab                             lsr         R7, #(3)
+0183 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+0184 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+0185 ---- 9f19                             ld          R1, [R1+R0]
+0186 ---- 9da1                             lsl         R1, #1
+0187 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+0188 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+0189 ---- fa01                             cmp         R7, #1
+018a ---- be05                             bneq        /id0246
+               ;?         output.outputArray[n] += 1;
+018b ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+018c ---- 9f19                                 ld          R1, [R1+R0]
+018d ---- 9801                                 add         R1, #1
+018e ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+018f ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0246:
+               ;?
+               ;?     //--------------------Iteration 16-------------------------
+               ;?     timer0Wait();
+0190 ---- cdb1                             wev1        #WEVSEL_TIMER0
+               ;?
+               ;?     gpioGetInputValueFast(AUXIO_I_INPUT_SAMPLING; signal);
+0191 ---- f912                             in          R7, [#IOP_AIODIO0_GPIODIN]
+0192 ---- fdab                             lsr         R7, #(3)
+0193 ---- f001                             and         R7, #0x0001
+               ;?
+               ;?     //gpioSetOutput(AUXIO_O_PIN_LED);
+               ;?     //gpioClearOutput(AUXIO_O_PIN_LED);
+               ;?
+               ;?     output.outputArray[n] <<= 1;
+0194 ---- 1075                             ld          R1, #(binarySampling/output/outputArray + 0)
+0195 ---- 9f19                             ld          R1, [R1+R0]
+0196 ---- 9da1                             lsl         R1, #1
+0197 ---- 2075                             ld          R2, #(binarySampling/output/outputArray + 0)
+0198 ---- 9f3a                             st          R1, [R2+R0]
+               ;?     if(signal == 1){
+0199 ---- fa01                             cmp         R7, #1
+019a ---- be05                             bneq        /id0257
+               ;?         output.outputArray[n] += 1;
+019b ---- 1075                                 ld          R1, #(binarySampling/output/outputArray + 0)
+019c ---- 9f19                                 ld          R1, [R1+R0]
+019d ---- 9801                                 add         R1, #1
+019e ---- 2075                                 ld          R2, #(binarySampling/output/outputArray + 0)
+019f ---- 9f3a                                 st          R1, [R2+R0]
+               ;?     }
+               /id0257:
+               ;?
+               ;? }
+01a0 ---- 8801                         add         R0, #1
+01a1 ---- 8a20                         cmp         R0, #32
+01a2 ---- a601                         bgeu        /br0000 ; Repaired out-of-range bltu
+01a3 ---- 04a0                         jmp         /id0263
+               /br0000:
+               ;?
+               ;? // Signalize that the task has been completed
+               ;? fwGenAlertInterrupt();
+01a4 ---- 086c                         ld          R0, [#fwCtrlInt/bvTaskIoAlert]
+01a5 ---- 8201                         or          R0, #(1 << 0)
+01a6 ---- 0c6c                         st          R0, [#fwCtrlInt/bvTaskIoAlert]
+               ;?
+               ;? // Stop the timer
+               ;? timer0Stop();
+01a7 ---- 440b                         iobclr      #0, [#IOP_TIMER01_T0CTL]
+               ;?
+               ;?
+               ;? evhSetupGpioTrigger(0, AUXIO_I_INPUT_TRIGGER, 1, EVH_GPIO_TRIG_ON_EDGE);
+01a8 ---- 703b                         ld          R7, #((BV_EVCTL_VECCFG1_VEC2_EN | ((EVCTL_VECEVSEL_AUXIO0 + 14) << IOB_EVCTL_VECCFG1_VEC2_EV)) | ((1 == 0) << IOB_EVCTL_VECCFG1_VEC2_POL))
+01a9 ---- 15ad                         jsr         EvhSetupTrigger
+01aa ---- 6642                         iobset      #2, [#IOP_EVCTL_VECFLAGSCLR]
+               binarySampling/event0Done:
+01ab ---- adb7                         rts
+
+
+
+
+               binarySampling/terminate:
+               ;?
+               binarySampling/terminateDone:
+01ac ---- adb7                         rts
+               .segment end "Task: binarySampling"
+
+
+               .segment begin "Procedure Library"
+               EvhSetupTrigger:
+                                       ; Disable and clear the vector flag
+01ad ---- 5527                         iobclr      #IOB_EVCTL_VECCFG1_VEC2_EN, [#IOP_EVCTL_VECCFG1]
+01ae ---- 6642                         iobset      #2, [#IOP_EVCTL_VECFLAGSCLR]
+
+                                       ; Configure and enable the vector flag (+ fixed configuration for channel 3)
+01af 862b f200                         or          R7, #(BV_EVCTL_VECCFG1_VEC3_EN | (EVCTL_VECEVSEL_AON_SW << IOB_EVCTL_VECCFG1_VEC3_EV))
+01b1 ---- fb27                         out         R7, [#IOP_EVCTL_VECCFG1]
+01b2 ---- adb7                         rts
+               .segment end "Procedure Library"
+
+
+; Generated by BERT-PC at 2021-02-25 15:16:33.077
