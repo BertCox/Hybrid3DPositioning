@@ -13,8 +13,9 @@ The softiware is written for the CC1310 Ultra-Low-Power Sub-1 Ghz Wireless micro
 
 ## 3D positioning optimisation algorithms
 
-The main.py file consists the necessary code to steer four beacons and receive chirp data of the mobile node. The distances are calculated in this file as well and stored in the correct folder.
-The data folder contains the measured distances for 150 positions in the Techtile setup.
-A python implementation of five positioning algorithms can be found in locfunc.py
-Plotting.py is used to create plotly figures of the setup.
+ - The main.py file consists the necessary code to steer four beacons and receive chirp data of the mobile node. The distances are calculated in this file as well and stored in the correct folder.
+ - The data folder contains the measured distances for 150 positions in the Techtile setup.
+ - A python implementation of five positioning algorithms can be found in locfunc.py
+ - Plotting.py is used to create plotly figures of the setup.
+
 Note that some paths need to be adapted to let the code work correctly.
